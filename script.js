@@ -19,6 +19,10 @@ const FILES = [
   'https://github.com/iuuu76j/474-Alpha-Music/blob/main/474/887r7r.txt',
   'https://github.com/iuuu76j/All-Alpha-Music/blob/main/Music/Music.txt'
 ];
+/* Songs that are always in the library (a GitHub "blob" link is fine: it is converted automatically). Delete the line to remove it. */
+const EXTRA = [
+  'https://github.com/iuuu76j/Ariana-Grande---Bye/blob/main/ariana_grande___bye_lyric_visualizer_plaidnjyabe_f7ec83fb.m4a'
+];
 const KEY = 'amu:';
 let ROW_H = 52;                        // read from --row in style.css (phones use taller rows)
 const OVER = 5;
@@ -76,6 +80,29 @@ function toPlayable(u) {
   try { return new URL(raw).href; } catch { return raw.replace(/ /g, '%20'); }
 }
 
+/* A GitHub file can be reached in several ways. If the first one fails, the player quietly tries the others. */
+function ghParts(u) {
+  const x = String(u);
+  const m = x.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/(.+)$/i) ||
+            x.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/(.+)$/i);
+  if (!m) return null;
+  const rest = m[3].split(/[?#]/)[0].replace(/^refs\/heads\//, '');
+  const i = rest.indexOf('/');
+  return i < 1 ? null : { user: m[1], repo: m[2], branch: rest.slice(0, i), path: rest.slice(i + 1) };
+}
+function mirrorsOf(u) {
+  const p = ghParts(u);
+  if (!p) return [];
+  const tail = p.user + '/' + p.repo;
+  return [
+    `https://cdn.jsdelivr.net/gh/${tail}@${p.branch}/${p.path}`,                 // correct audio MIME type + range requests
+    `https://media.githubusercontent.com/media/${tail}/${p.branch}/${p.path}`    // Git LFS files
+  ].map((x) => { try { return new URL(x).href; } catch { return x.replace(/ /g, '%20'); } });
+}
+const MIME = { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', flac: 'audio/flac', weba: 'audio/webm', webm: 'audio/webm', mp4: 'audio/mp4' };
+const mimeOf = (u) => MIME[(String(u).split(/[?#]/)[0].split('.').pop() || '').toLowerCase()] || 'audio/mpeg';
+const srcOf = (t) => t.p || t.s;                      // the address currently being tried for this song
+
 const isImage = (u) => /\.(jpe?g|png|webp|gif|avif|bmp|svg)(\?|#|$)/i.test(u);
 const AUDIO_EXT = /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac|weba|webm|mp4)$/i;
 
@@ -94,7 +121,7 @@ function makeTrack(u) {
   const s = toPlayable(u);
   try { new URL(s); } catch { return null; }
   const n = nameFromUrl(u);
-  return { n, s, cv: '', k: n.toLowerCase(), bad: false };
+  return { n, s, cv: '', k: n.toLowerCase(), bad: false, p: '', alts: null, ti: 0, blobTried: false };
 }
 /* every link is its own song: no groups, no separators, no cover pairing */
 function parse(text) {
@@ -114,7 +141,7 @@ const dupKey = (u) => { let k = u; try { k = decodeURIComponent(u); } catch { /*
 const nameKey = (n) => n.normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
 function rebuild() {
   const seenS = new Set(), seenN = new Set(), out = [];
-  for (const text of texts) {
+  for (const text of [...texts, EXTRA.join('\n')]) {
     if (text == null) continue;
     for (const t of parse(text)) {
       const a = dupKey(t.s), b = nameKey(t.n);
@@ -329,8 +356,8 @@ function preloadNext() {
   }
   if (pre.s === n.s && pre.el === idle) return;
   idle.loop = false; idle.preload = 'auto';
-  setCors(idle, n.s);
-  idle.src = n.s; idle.load();
+  setCors(idle, srcOf(n));
+  idle.src = srcOf(n); idle.load();
   pre = { s: n.s, el: idle };
 }
 
@@ -339,7 +366,7 @@ function playTrack(t, o = {}) {
   if (!t) return;
   if (sameTrack(t, cur) && !t.bad && !o.force) { togglePlay(); return; }
   if (cur && !sameTrack(t, cur) && !o.noHistory) { history.push(cur); if (history.length > HISTORY_MAX) history.shift(); }
-  cur = t; t.bad = false;
+  cur = t; t.bad = false; t.p = ''; t.ti = 0; t.blobTried = false;
   if (o.list) { ctxList = o.list; }
   ensureCtx();
   if (!o.fromQueue) { const idx = ctxList.findIndex((x) => x.s === t.s); if (idx >= 0) ctxPos = idx; }
@@ -351,7 +378,7 @@ function playTrack(t, o = {}) {
   paintRows(false);
 }
 function startAudio(t) {
-  if (g && blocked.has(hostOf(t.s))) {                 // a host that forbids audio analysis cannot play once effects are on
+  if (g && blocked.has(hostOf(srcOf(t)))) {                 // a host that forbids audio analysis cannot play once effects are on
     t.bad = true; audio.pause();
     setStatus('This audio host blocks effects, so it cannot play after DJ Tools or Visualizer were used. Reload the page to play it.', 'err');
     toast('Song unavailable with effects on'); updatePlayUI(); paintRows(false);
@@ -372,14 +399,14 @@ function startAudio(t) {
     if (p && p.catch) p.catch((err) => {
       if (err && err.name === 'NotAllowedError') {   // some mobile browsers only allow the element that already played
         ai = 1 - ai; audio = old; audio.loop = S.repeat === 'one';
-        setCors(audio, t.s); audio.src = t.s; audio.play().catch(onRejected);
+        setCors(audio, srcOf(t)); audio.src = srcOf(t); audio.play().catch(onRejected);
       } else onRejected(err);
     });
     return;
   }
   audio.loop = S.repeat === 'one';
-  setCors(audio, t.s);
-  audio.src = t.s;
+  setCors(audio, srcOf(t));
+  audio.src = srcOf(t);
   const p = audio.play();
   if (p && p.catch) p.catch(onRejected);
 }
@@ -390,7 +417,7 @@ function syncFromAudio() {
 }
 function resume() {
   if (!cur) return;
-  if (audio.error || !audio.getAttribute('src')) { cur.bad = false; setCors(audio, cur.s); audio.src = cur.s; setStatus('Loading…'); }
+  if (audio.error || !audio.getAttribute('src')) { cur.bad = false; cur.p = ''; cur.ti = 0; cur.blobTried = false; setCors(audio, cur.s); audio.src = cur.s; setStatus('Loading…'); }
   if (g && g.ctx.state === 'suspended') g.ctx.resume().catch(noop);
   const p = audio.play();
   if (p && p.catch) p.catch(onRejected);
@@ -476,18 +503,62 @@ function onRejected(err) {
 function onError() {
   const err = audio.error;
   if (!err || err.code === 1 || !cur || !audio.getAttribute('src')) return;
-  const h = hostOf(cur.s);
+  const h = hostOf(srcOf(cur));
   // A host without CORS can fail on an analysis-ready element: retry once natively (only possible before effects are used)
-  if (!g && audio.crossOrigin && !blocked.has(h)) {
+  if (h && !g && audio.crossOrigin && !blocked.has(h)) {
     blocked.add(h); corsProbe = h;
-    setCors(audio, cur.s); audio.src = cur.s; audio.play().catch(noop);
+    setCors(audio, srcOf(cur)); audio.src = srcOf(cur); audio.play().catch(noop);
     return;
   }
   if (corsProbe === h) { blocked.delete(h); corsProbe = ''; }   // failed natively too: a dead link, not CORS
+  if (nextSource(cur)) return;                                    // try a different route to the same file
+  failCurrent(err.code);
+}
+function failCurrent(code) {
+  if (!cur) return;
   cur.bad = true;
-  setStatus(err.code === 2 ? 'Network error while loading this song.' : err.code === 3 ? 'This song could not be decoded.' : 'This song is unavailable.', 'err');
+  setStatus(code === 2 ? 'Network error while loading this song.' : code === 3 ? 'This song could not be decoded.' : 'This song is unavailable.', 'err');
   updatePlayUI(); paintRows(false);
   if (++failStreak <= 5) { toast('Skipping an unavailable song'); next(false); }
+}
+/* Fallback chain for GitHub files: raw.githubusercontent -> jsDelivr -> media.githubusercontent (LFS) -> download + play from memory with the right MIME type */
+function nextSource(t) {
+  if (!t || t !== cur) return false;
+  if (!t.alts) t.alts = mirrorsOf(t.s);
+  if (t.ti < t.alts.length) {
+    t.p = t.alts[t.ti++];
+    setStatus('Trying another source…');
+    setCors(audio, t.p); audio.src = t.p; audio.play().catch(onRejected);
+    return true;
+  }
+  if (t.alts.length && !t.blobTried) {
+    t.blobTried = true;
+    setStatus('Downloading this song…');
+    playAsBlob(t);
+    return true;
+  }
+  return false;
+}
+const blobUrls = [];
+async function playAsBlob(t) {
+  let blob = null;
+  for (const u of [t.s, ...t.alts]) {
+    try {
+      const r = await fetch(u);
+      if (!r.ok) continue;
+      const buf = await r.arrayBuffer();
+      if (buf.byteLength < 4096) continue;             // an error page or a Git LFS pointer, not audio
+      blob = new Blob([buf], { type: mimeOf(t.s) });
+      break;
+    } catch { /* try the next address */ }
+  }
+  if (t !== cur) return;                                // the user moved on while downloading
+  if (!blob) { failCurrent(2); return; }
+  const url = URL.createObjectURL(blob);
+  blobUrls.push(url);
+  while (blobUrls.length > 3) URL.revokeObjectURL(blobUrls.shift());
+  t.p = url;
+  setCors(audio, url); audio.src = url; audio.play().catch(onRejected);
 }
 
 /* ============================== audio graph: DJ tools + visualizer ============================== */
@@ -996,6 +1067,7 @@ function init() {
   paintRange(E.seek);
   syncRowH();
   showMsg('Loading music…');
+  rebuild();
   loadAll(false);
   scheduleRefresh(false);
 }
